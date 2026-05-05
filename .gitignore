@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 
 # C extensions
 *.so
@@ -25,6 +27,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+pip-wheel-metadata/
 
 # Virtual environments
 venv/
@@ -33,6 +36,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+pythonenv*
 
 # Unit test / coverage reports
 htmlcov/
@@ -48,26 +52,56 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+coverage/
 
 # Logs
 *.log
 pip-log.txt
 pip-delete-this-directory.txt
+report.log
 
 # Notebook and IDE files
 .ipynb_checkpoints
 .vscode/
+.idea/
+*.code-workspace
 
 # Type checker / linter cache
 .mypy_cache/
 .pyre/
 .pytype/
 .ruff_cache/
+.dmypy.json
+dmypy.json
 
 # Environment files
 .env
 .envrc
+.env.*
+
+# Python version managers
+.python-version
+
+# Notebook runtime
+.jupyter/
+
+# Static analysis / docs build
+docs/_build/
+site/
 
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# Project-generated runtime artifacts (keep tracked files manually if already committed)
+*.tmp
+*.temp
+
+# Optional experiment outputs (uncomment if you do not want generated outputs tracked)
+# constraint_combination_results.csv
+# lambda_sweep_results.csv
+# constraint_combination_analysis.png
+# portfolio_optimization_analysis.png
+# trading_costs.csv
+# lot_sizes.csv

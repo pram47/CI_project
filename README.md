@@ -1,239 +1,176 @@
-# Portfolio Optimization Using Mean-Variance Model with 7 Realistic Constraints
+# Portfolio Optimization with Mean-Variance + Practical Constraints
 
-## Overview
+This project builds a realistic portfolio optimization workflow using a Mean-Variance objective, Particle Swarm Optimization (PSO), and real market data from Yahoo Finance.
 
-This project implements a comprehensive portfolio optimization system using the Mean-Variance (M-V) model with real stock data from Yahoo Finance. The program automatically searches for the best constraint configuration and risk-return trade-off (λ) using grid experiments, then applies those settings to produce the final optimized portfolio.
+The pipeline does not just optimize portfolio weights once. It also searches for the best constraint set and the best risk-aversion parameter (lambda) before running the final constrained optimization.
 
-## Key Features
+## What This Project Solves
 
-### 1. Real Data Integration (yfinance)
-- Historical price data for the past 2 years (~500 trading days)
-- Real bid-ask spreads used as variable transaction costs per stock
-- Per-stock minimum lot sizes (minimum purchasable shares) fetched from yfinance
-- Universe: 100 US large-cap stocks; optimizer selects final holdings automatically
+Given a universe of US large-cap stocks, the program finds portfolio weights that balance risk and return under practical trading constraints such as:
 
-### 2. Objective Function
-```
-Minimize: Z = [λ × σ_p² - (1 - λ) × E_p] + Penalty_Total
-```
-- **σ_p²** — Portfolio variance (risk)
-- **E_p** — Expected annual return (net of transaction costs)
-- **λ** — Risk aversion coefficient, automatically optimized in [0, 1]
-- **Penalty_Total** — Weighted sum of all constraint violation penalties
+1. no short selling
+2. position bounds
+3. max number of holdings (cardinality)
+4. transaction costs
+5. lot-size rounding
+6. sector exposure cap
+7. minimum position size
 
-### 3. Seven Realistic Constraints
+## Objective Function
 
-| # | Constraint | Description |
-|---|---|---|
-| 1 | **No Short Selling** | All weights w_i ≥ 0 |
-| 2 | **Boundary** | Each w_i within [L_i, U_i]; U_i searched over 5%–20% |
-| 3 | **Cardinality** | Maximum K active assets; K searched over 5–20 |
-| 4 | **Transaction Costs** | Real bid-ask spreads (variable) + broker commission (fixed) |
-| 5 | **Transaction Lots** | Per-stock lot step = (min_shares × price) / portfolio_value |
-| 6 | **Sector Constraint** | Sector weight ≤ sector_max; searched over 10%–25% |
-| 7 | **Minimum Investment** | If invested, allocation ≥ 5% of portfolio |
+The optimizer minimizes:
 
-### 4. Optimization Pipeline
-
-```
-Data Fetch & Clean
-       ↓
-Unconstrained Baseline (SLSQP)
-       ↓
-Constraint Combination Experiment
-  Grid: max_weight (5%–20%, step 1%) × cardinality (5–20) × sector_max (10%–25%, step 5%)
-  Up to 1,024 combinations; PSO with 12 particles × 50 iterations each
-       ↓
-Lambda Sweep (0.00 → 1.00, step 0.01)
-  101 values; PSO with 10 particles × 35 iterations each
-  Uses best constraints found above
-       ↓
-Final Portfolio
-  Best constraints + best λ → reported results & visualizations
+```text
+Z = lambda * variance - (1 - lambda) * expected_return + penalties
 ```
 
-### 5. Output Metrics
-- **Annual Return** — Expected return net of transaction costs
-- **Gross Return** — Return before cost deduction
-- **Transaction Cost Deduction** — Cost impact
-- **Annual Volatility** — Portfolio standard deviation
-- **Sharpe Ratio** — (Return − Risk-free Rate) / Volatility
+Where:
 
----
+1. `variance` is annualized portfolio variance
+2. `expected_return` is annualized expected return net of transaction costs
+3. `lambda` is risk-aversion in `[0, 1]`
+4. `penalties` enforce constraint compliance
 
-## Project Structure
+## Optimization Workflow
 
+```text
+Fetch and clean data
+       -> Baseline unconstrained solve (SLSQP)
+       -> Constraint combination sweep
+                      max_weight x cardinality x sector_max
+       -> Lambda sweep on top combinations
+       -> Final PSO portfolio with best constraints + best lambda
+       -> Reports + CSV exports + plots
 ```
+
+## Repository Contents
+
+```text
 Ci_project/
-├── portfolio_optimization.py          # Main implementation
-├── requirements.txt                   # Python dependencies
-├── README.md                          # This file
-├── trading_costs.csv                  # Real bid-ask data per stock (generated)
-├── lot_sizes.csv                      # Real minimum lot sizes per stock (generated)
-├── TRADING_PARAMETERS.md              # Trading parameter documentation
-├── constraint_combination_results.csv # All combination experiment results (generated)
-├── lambda_sweep_results.csv           # Lambda sweep results (generated)
-├── constraint_combination_analysis.png# Constraint experiment charts (generated)
-└── portfolio_optimization_analysis.png# Final portfolio analysis charts (generated)
+       portfolio_optimization.py
+       examples.py
+       test_setup.py
+       requirements.txt
+       QUICKSTART.md
+       TRADING_PARAMETERS.md
+       config.ini
+
+       # Generated/analysis artifacts
+       constraint_combination_results.csv
+       lambda_sweep_results.csv
+       trading_costs.csv
+       lot_sizes.csv
+       constraint_combination_analysis.png
+       portfolio_optimization_analysis.png
 ```
 
----
+## Requirements
 
-## Installation
+1. Python 3.9+
+2. Internet connection (for Yahoo Finance API calls)
+3. Dependencies from `requirements.txt`
 
-### 1. Create Virtual Environment
+Install:
+
 ```bash
 python -m venv venv
-venv\Scripts\activate   # Windows
-source venv/bin/activate  # macOS/Linux
+venv\Scripts\activate
+pip install -r requirements.txt
+python test_setup.py
 ```
 
-### 2. Install Dependencies
+## How To Run
+
+Default full run:
+
+```bash
+python portfolio_optimization.py
+```
+
+Fast run with reduced grid via scale:
+
+```bash
+python portfolio_optimization.py --scale 1
+python portfolio_optimization.py --scale 3
+python portfolio_optimization.py --scale 5
+python portfolio_optimization.py --scale 10
+```
+
+Scale behavior:
+
+1. accepts integers `1..10`
+2. `1` = 10% sampled density per grid dimension
+3. `10` = full search space
+
+## Main Parameters (Current Defaults)
+
+Important defaults inside `portfolio_optimization.py`:
+
+1. Universe: 100 US large-cap stocks
+2. Price window: last 2 years
+3. `max_weight` search: 0.05 to 0.20 (step 0.01)
+4. `cardinality` search: 5 to 20
+5. `sector_max` search: 0.10 to 0.25 (step 0.05)
+6. lot-size reference portfolio value: `100000`
+7. min investment threshold: `0.05`
+
+## Produced Outputs
+
+CSV files:
+
+1. `constraint_combination_results.csv`: all tested constraint combinations and metrics
+2. `lambda_sweep_results.csv`: lambda sweep performance across top combinations
+3. `trading_costs.csv`: fetched spread-related trading-cost inputs
+4. `lot_sizes.csv`: fetched lot-size assumptions per ticker
+
+Plots:
+
+1. `constraint_combination_analysis.png`
+2. `portfolio_optimization_analysis.png`
+
+Console sections:
+
+1. data diagnostics and market parameter summary
+2. unconstrained baseline metrics
+3. best constraint-combination leaderboard
+4. best lambda summary
+5. final constrained portfolio and comparative table
+
+## Notes On Realism
+
+1. Trading costs are estimated from bid-ask spread data and fixed trade cost assumptions.
+2. Lot-size handling uses per-asset weight steps derived from lot size and current price.
+3. Sector limits are built dynamically from fetched metadata when available.
+4. The repair-and-penalty approach keeps candidate solutions feasible enough for stochastic search.
+
+## Troubleshooting
+
+`ModuleNotFoundError`:
+
 ```bash
 pip install -r requirements.txt
 ```
 
----
+No data returned from yfinance:
 
-## Usage
+1. verify internet access
+2. verify ticker symbols
+3. reduce universe size to test quickly
+4. rerun later in case of temporary data-provider issues
 
-### Run the optimization
+Runtime too long:
 
-```bash
-# Full run — all 1,024 combinations + 101 lambda values (may take several hours)
-python portfolio_optimization.py
+1. run with `--scale 1` or `--scale 3`
+2. reduce PSO particles/iterations in code
+3. shorten historical period
 
-# Scale mode — run only a fraction for faster testing
-python portfolio_optimization.py --scale 1   # 10%  (~4 combos,  10 lambda values)
-python portfolio_optimization.py --scale 3   # 30%  (~27 combos, 30 lambda values)
-python portfolio_optimization.py --scale 5   # 50%  (~128 combos, 50 lambda values)
-python portfolio_optimization.py --scale 10  # 100% — same as no flag (default)
-```
+## Suggested Next Enhancements
 
-`--scale` accepts **1–10** (default: `10`).  
-Scale 1 = 10 % of each grid dimension sampled evenly, scale 10 = full grid.
+1. Add Differential Evolution baseline for apples-to-apples comparison.
+2. Add walk-forward or rolling-window validation.
+3. Add explicit turnover constraint across rebalancing dates.
+4. Export selected portfolio as broker-ready order sheet.
 
-### Customize the Stock Universe
+## Disclaimer
 
-Edit `TOP_100_US_LARGE_CAPS` at the top of `portfolio_optimization.py`, or replace the list passed to `PortfolioDataFetcher`:
-
-```python
-stocks = ['AAPL', 'MSFT', 'GOOGL', ...]
-```
-
----
-
-## Output
-
-### Console Output
-- Universe size and data period
-- Real trading parameters (bid-ask spreads, lot sizes, cost per trade)
-- Per-stock lot weight summary
-- Sector coverage breakdown
-- Unconstrained baseline portfolio weights and metrics
-- Live progress: `Running combination X/1024 ...` (single overwriting line)
-- Top-10 constraint combinations by Sharpe ratio
-- Summary sentence (Thai) of the best combination found
-- Live progress: `Running lambda X/101 ...` (single overwriting line)
-- Best λ and its portfolio metrics
-- Final PSO portfolio weights, metrics, and sector breakdown
-- Side-by-side comparison table
-
-### Visualizations
-
-**`constraint_combination_analysis.png`** — 6-panel chart:
-1. Sharpe ratio heatmap (max_weight × cardinality)
-2. Annual return heatmap
-3. Risk-Return scatter (all combinations)
-4. Sharpe ratio by cardinality (line chart)
-5. Sharpe ratio vs combination ID (all tested combinations)
-6. Top-10 combinations bar chart
-
-**`portfolio_optimization_analysis.png`** — 9-panel chart:
-1. Top portfolio weights comparison (Unconstrained vs PSO)
-2. Risk-Return profile scatter
-3. Top-holdings correlation heatmap
-4. Historical cumulative performance
-5. Sharpe ratio comparison
-6. Return vs Volatility comparison
-7. **Lambda vs Sharpe ratio** (sweep result curve)
-8. Portfolio weight distribution (pie chart)
-9. Sector allocation comparison
-
----
-
-## Mathematical Details
-
-### Transaction Cost Model
-```
-Net Return = Gross Return − (fixed_cost × active_assets) − (variable_cost × portfolio_turnover)
-variable_cost = bid-ask spread / 2   (one-way cost)
-```
-
-### Per-Stock Lot Size Constraint
-```
-lot_weight_i = (min_shares_i × price_i) / reference_portfolio_value
-weight_i rounded to nearest multiple of lot_weight_i
-```
-Reference portfolio value: **$100,000**
-
-### Penalty Approach
-```
-Total Objective = Objective + Σ(penalty_coefficient × violation²)
-penalty_coefficient = 1000
-```
-
----
-
-## Requirements
-
-- Python 3.8+
-- `numpy` — numerical computations
-- `pandas` — data manipulation
-- `yfinance` — real stock data (prices, bid-ask, lot sizes, sectors)
-- `matplotlib` — visualization
-- `scipy` — unconstrained baseline optimization (SLSQP)
-- `pyswarms` — PSO implementation
-
----
-
-## Data Source
-
-**Yahoo Finance via `yfinance`**
-- Historical OHLCV prices (2-year window, ~500 trading days)
-- Real-time bid/ask prices for transaction cost estimation
-- Sector and industry metadata for constraint building
-- Minimum lot size (`regularMarketDayLow` and `info` fields)
-
----
-
-## Key Insights
-
-1. **Automated constraint tuning** — the program finds the best (max_weight, cardinality, sector_max) triple automatically instead of manual guessing
-2. **Automated λ tuning** — the lambda sweep eliminates the need to manually set the risk-return trade-off
-3. **Real transaction costs** — using live bid-ask spreads grounds the optimization in actual market friction
-4. **Per-stock lot rounding** — each stock's minimum purchase unit is respected independently
-5. **Scale flag** — `--scale 1` lets you validate the full pipeline end-to-end in minutes
-3. **Practical Implementation**: Transaction lots ensure realistic portfolio construction
-4. **Risk Management**: Cardinality constraint limits tracking error from too many positions
-
-## Future Enhancements
-
-- Differential Evolution (DE) algorithm comparison
-- Black-Litterman model for return estimation
-- Real-time portfolio rebalancing
-- Machine learning for constraint parameter optimization
-- Multi-objective optimization (Pareto frontier)
-
-## License
-
-This project is provided for educational and research purposes.
-
-## Contact & Support
-
-For questions or issues, please refer to the code documentation and comments.
-
----
-
-**Created by**: Financial Data Scientist and Optimization Specialist
-**Last Updated**: 2026
+This project is for education and research only. It is not investment advice.
