@@ -19,6 +19,15 @@ This document explains the real trading parameters fetched from Yahoo Finance an
 
 ## Current Parameters
 
+### Universe Filter Used by the Pipeline
+The selection pipeline now uses an annualized volatility floor instead of a raw share-volume floor:
+
+| Filter | Value | Description |
+|--------|-------|-------------|
+| **Minimum Annualized Volatility** | 3% | Removes stocks whose average yearly price movement is too low to be useful for ranking and PSO selection |
+
+This avoids the blind spot where a high-price stock can trade fewer shares but still have meaningful dollar turnover.
+
 ### Trading Costs Summary
 ```
 Average Bid-Ask Spread:     1.2327%
@@ -170,6 +179,32 @@ After costs net: 33.55% annual
 - Commission assumes commission-free broker (Robinhood/Fidelity/IB fractional)
 - Spreads tighten during US market open (9:30 AM - 4:00 PM EST)
 - Spreads widen during after-hours trading
+
+---
+
+## Historical Constituents Metadata Schema
+
+To reduce survivorship bias in a 10-year walk-forward backtest, use a date-aware metadata table instead of only the current S&P 500 membership.
+
+Recommended `metadata_df` columns:
+
+| Column | Type | Example | Purpose |
+|--------|------|---------|---------|
+| `ticker` | string | `AAPL` | Security identifier |
+| `sector` | string | `Technology` | Sector stratification |
+| `market_cap` | number | `2.8e12` | Optional size ranking |
+| `avg_volume` | number | `5.4e7` | Optional liquidity field |
+| `effective_from` | date | `2018-01-01` | First date the security is a valid constituent |
+| `effective_to` | date/null | `2024-12-31` | Last valid date, or null if still active |
+| `as_of_date` | date | `2020-06-30` | Snapshot date for the universe used in a walk-forward fold |
+| `is_constituent` | bool | `true` | Whether the security belongs to the index on `as_of_date` |
+
+Best practice for walk-forward input:
+
+1. Filter the price panel to tickers that are valid on each fold's `train_end` date.
+2. Use only metadata rows whose `effective_from <= train_end <= effective_to`.
+3. Never use future membership information when ranking or selecting the train universe.
+4. Keep delisted or removed names in the dataset so the backtest reflects real index churn.
 
 ---
 

@@ -2,6 +2,8 @@
 
 This project builds a realistic portfolio optimization workflow using a Mean-Variance objective, Particle Swarm Optimization (PSO), and real market data from Yahoo Finance.
 
+Historical prices and reusable market metadata can now be cached locally in CSV files so the optimizer does not need to call Yahoo Finance on every run.
+
 The pipeline does not just optimize portfolio weights once. It also searches for the best constraint set and the best risk-aversion parameter (lambda) before running the final constrained optimization.
 
 ## What This Project Solves
@@ -79,6 +81,12 @@ pip install -r requirements.txt
 python test_setup.py
 ```
 
+Build the reusable local cache once:
+
+```bash
+python build_sp500_cache.py
+```
+
 ## How To Run
 
 Default full run:
@@ -86,6 +94,8 @@ Default full run:
 ```bash
 python portfolio_optimization.py
 ```
+
+If [sp500_daily_prices_10y.csv](c:/Users/pram/OneDrive/Desktop/devops/djrepo_wk4_slide34/CI_project/sp500_daily_prices_10y.csv), [sp500_asset_metadata.csv](c:/Users/pram/OneDrive/Desktop/devops/djrepo_wk4_slide34/CI_project/sp500_asset_metadata.csv), [sp500_trading_costs.csv](c:/Users/pram/OneDrive/Desktop/devops/djrepo_wk4_slide34/CI_project/sp500_trading_costs.csv), and [sp500_lot_sizes.csv](c:/Users/pram/OneDrive/Desktop/devops/djrepo_wk4_slide34/CI_project/sp500_lot_sizes.csv) exist, the program loads them first and only falls back to `yfinance` when the cache is missing or does not cover the requested slice.
 
 Fast run with reduced grid via scale:
 
@@ -122,6 +132,10 @@ CSV files:
 2. `lambda_sweep_results.csv`: lambda sweep performance across top combinations
 3. `trading_costs.csv`: fetched spread-related trading-cost inputs
 4. `lot_sizes.csv`: fetched lot-size assumptions per ticker
+5. `sp500_daily_prices_10y.csv`: reusable 10-year daily price cache for the current S&P 500 constituents
+6. `sp500_asset_metadata.csv`: cached sector metadata
+7. `sp500_trading_costs.csv`: cached spread/current-price inputs
+8. `sp500_lot_sizes.csv`: cached lot-size inputs
 
 Plots:
 

@@ -18,8 +18,16 @@ from scipy.optimize import minimize
 from pyswarms.single.global_best import GlobalBestPSO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
+
+DEFAULT_PRICE_CACHE_PATH = Path('sp500_daily_prices_10y.csv')
+DEFAULT_METADATA_CACHE_PATH = Path('sp500_asset_metadata.csv')
+DEFAULT_TRADING_COSTS_CACHE_PATH = Path('sp500_trading_costs.csv')
+DEFAULT_LOT_SIZES_CACHE_PATH = Path('sp500_lot_sizes.csv')
+DEFAULT_SP500_TICKERS_CACHE_PATH = Path('sp500_tickers.csv')
 
 TOP_100_US_LARGE_CAPS = [
     'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'BRK-B', 'TSLA', 'JPM', 'V',
@@ -41,7 +49,17 @@ TOP_100_US_LARGE_CAPS = [
 class PortfolioDataFetcher:
     """Fetch and prepare portfolio data from yfinance"""
     
-    def __init__(self, ticker_symbols, start_date=None, end_date=None):
+    def __init__(
+        self,
+        ticker_symbols,
+        start_date=None,
+        end_date=None,
+        price_cache_path=DEFAULT_PRICE_CACHE_PATH,
+        metadata_cache_path=DEFAULT_METADATA_CACHE_PATH,
+        trading_costs_cache_path=DEFAULT_TRADING_COSTS_CACHE_PATH,
+        lot_sizes_cache_path=DEFAULT_LOT_SIZES_CACHE_PATH,
+        use_cache=True
+    ):
         """
         Initialize data fetcher
         
@@ -53,11 +71,85 @@ class PortfolioDataFetcher:
         self.ticker_symbols = ticker_symbols
         self.end_date = end_date or datetime.now().date()
         self.start_date = start_date or (self.end_date - timedelta(days=365*2))
+        self.price_cache_path = Path(price_cache_path) if price_cache_path else None
+        self.metadata_cache_path = Path(metadata_cache_path) if metadata_cache_path else None
+        self.trading_costs_cache_path = Path(trading_costs_cache_path) if trading_costs_cache_path else None
+        self.lot_sizes_cache_path = Path(lot_sizes_cache_path) if lot_sizes_cache_path else None
+        self.use_cache = use_cache
+
+    @staticmethod
+    def _normalize_ticker_symbols(ticker_symbols):
+        return [str(ticker_symbol).strip().upper() for ticker_symbol in ticker_symbols]
+
+    def _load_cached_price_data(self):
+        """Load cached price history and slice it to the requested universe/date range."""
+        if not self.use_cache or self.price_cache_path is None or not self.price_cache_path.exists():
+            return None
+
+        cached_data = pd.read_csv(self.price_cache_path, parse_dates=['Date'])
+        if 'Date' not in cached_data.columns:
+            raise ValueError(f"Cached price file must contain a 'Date' column: {self.price_cache_path}")
+
+        cached_data = cached_data.set_index('Date').sort_index()
+        cached_data.columns = self._normalize_ticker_symbols(cached_data.columns)
+
+        requested_symbols = self._normalize_ticker_symbols(self.ticker_symbols)
+        available_tickers = [ticker_symbol for ticker_symbol in requested_symbols if ticker_symbol in cached_data.columns]
+        missing_tickers = [ticker_symbol for ticker_symbol in requested_symbols if ticker_symbol not in cached_data.columns]
+
+        if not available_tickers:
+            return None
+
+        sliced_data = cached_data.loc[
+            (cached_data.index >= pd.Timestamp(self.start_date)) &
+            (cached_data.index <= pd.Timestamp(self.end_date)),
+            available_tickers
+        ].copy()
+
+        if missing_tickers:
+            print(f"Warning: cache returned no price history for {len(missing_tickers)} tickers.")
+
+        sliced_data = sliced_data.dropna(axis=1, how='all')
+        if sliced_data.shape[1] == 0 or sliced_data.dropna(how='all').empty:
+            return None
+
+        print(f"Loaded cached price data from {self.price_cache_path}")
+        return sliced_data
+
+    def _load_cached_ticker_frame(self, cache_path, required_columns, ticker_symbols=None):
+        """Load cached per-ticker metadata/trading inputs and align to the requested universe."""
+        if not self.use_cache or cache_path is None or not cache_path.exists():
+            return None
+
+        cached_frame = pd.read_csv(cache_path)
+        if 'ticker' not in cached_frame.columns:
+            raise ValueError(f"Cached ticker file must contain a 'ticker' column: {cache_path}")
+
+        missing_columns = [column for column in required_columns if column not in cached_frame.columns]
+        if missing_columns:
+            raise ValueError(
+                f"Cached ticker file {cache_path} is missing required columns: {', '.join(missing_columns)}"
+            )
+
+        cached_frame['ticker'] = self._normalize_ticker_symbols(cached_frame['ticker'])
+        cached_frame = cached_frame.drop_duplicates(subset='ticker', keep='last').set_index('ticker')
+        requested_symbols = self._normalize_ticker_symbols(ticker_symbols or self.ticker_symbols)
+        aligned_frame = cached_frame.reindex(requested_symbols)
+
+        if aligned_frame.dropna(how='all').empty:
+            return None
+
+        print(f"Loaded cached market data from {cache_path}")
+        return aligned_frame
         
     def fetch_data(self):
         """Fetch adjusted close prices from yfinance"""
         print(f"Fetching data for {len(self.ticker_symbols)} stocks...")
         print(f"Period: {self.start_date} to {self.end_date}")
+
+        cached_data = self._load_cached_price_data()
+        if cached_data is not None:
+            return cached_data
         
         # Download data
         raw_data = yf.download(
@@ -88,8 +180,8 @@ class PortfolioDataFetcher:
         if missing_tickers:
             print(f"Warning: yfinance returned no usable price series for {len(missing_tickers)} tickers.")
 
-        cleaned_data = data[available_tickers].dropna(axis=1, how='all').dropna()
-        if cleaned_data.shape[1] == 0:
+        cleaned_data = data[available_tickers].dropna(axis=1, how='all')
+        if cleaned_data.shape[1] == 0 or cleaned_data.dropna(how='all').empty:
             raise ValueError("No valid price series remained after cleaning the downloaded data.")
 
         return cleaned_data
@@ -111,6 +203,29 @@ class PortfolioDataFetcher:
         return TOP_100_US_LARGE_CAPS.copy()
 
     @staticmethod
+    def get_sp500_stocks(cache_path=DEFAULT_SP500_TICKERS_CACHE_PATH):
+        """Return S&P 500 ticker symbols from local cache when available."""
+        cache_path = Path(cache_path)
+        if cache_path.exists():
+            ticker_df = pd.read_csv(cache_path)
+            if 'Symbol' in ticker_df.columns:
+                tickers = ticker_df['Symbol'].dropna().astype(str).tolist()
+                tickers = [_normalize_ticker_symbol(ticker_symbol) for ticker_symbol in tickers]
+                return sorted(list(dict.fromkeys(tickers)))
+
+        if DEFAULT_PRICE_CACHE_PATH.exists():
+            price_head_df = pd.read_csv(DEFAULT_PRICE_CACHE_PATH, nrows=1)
+            tickers = [
+                _normalize_ticker_symbol(column)
+                for column in price_head_df.columns
+                if column != 'Date'
+            ]
+            if tickers:
+                return sorted(list(dict.fromkeys(tickers)))
+
+        return PortfolioDataFetcher.get_top_100_us_stocks()
+
+    @staticmethod
     def _fetch_single_asset_metadata(ticker_symbol):
         """Fetch sector metadata for one ticker with safe fallbacks."""
         try:
@@ -125,6 +240,15 @@ class PortfolioDataFetcher:
     def fetch_asset_metadata(self, ticker_symbols=None, max_workers=10):
         """Fetch sector metadata for all tickers in parallel."""
         symbols = ticker_symbols or self.ticker_symbols
+        cached_metadata = self._load_cached_ticker_frame(
+            self.metadata_cache_path,
+            required_columns=['sector'],
+            ticker_symbols=symbols
+        )
+        if cached_metadata is not None:
+            cached_metadata['sector'] = cached_metadata['sector'].fillna('Unknown')
+            return cached_metadata
+
         metadata_rows = []
 
         with ThreadPoolExecutor(max_workers=min(max_workers, len(symbols))) as executor:
@@ -186,6 +310,14 @@ class PortfolioDataFetcher:
     def fetch_trading_costs(self, ticker_symbols=None, max_workers=10):
         """Fetch trading cost estimates (bid-ask spread) for all tickers in parallel."""
         symbols = ticker_symbols or self.ticker_symbols
+        cached_costs = self._load_cached_ticker_frame(
+            self.trading_costs_cache_path,
+            required_columns=['current_price', 'bid', 'ask', 'spread_pct'],
+            ticker_symbols=symbols
+        )
+        if cached_costs is not None:
+            return cached_costs
+
         cost_rows = []
 
         with ThreadPoolExecutor(max_workers=min(max_workers, len(symbols))) as executor:
@@ -226,6 +358,14 @@ class PortfolioDataFetcher:
     def fetch_lot_sizes(self, ticker_symbols=None, max_workers=10):
         """Fetch lot size constraints for all tickers in parallel."""
         symbols = ticker_symbols or self.ticker_symbols
+        cached_lot_sizes = self._load_cached_ticker_frame(
+            self.lot_sizes_cache_path,
+            required_columns=['lot_size', 'price_point'],
+            ticker_symbols=symbols
+        )
+        if cached_lot_sizes is not None:
+            return cached_lot_sizes
+
         lot_rows = []
 
         with ThreadPoolExecutor(max_workers=min(max_workers, len(symbols))) as executor:
@@ -243,6 +383,354 @@ class PortfolioDataFetcher:
     def get_sample_data():
         """Backward-compatible alias for the default 100-stock universe."""
         return PortfolioDataFetcher.get_top_100_us_stocks()
+
+
+def _normalize_ticker_symbol(ticker_symbol):
+    return str(ticker_symbol).strip().upper().replace('.', '-')
+
+
+def _clean_price_frame(price_df):
+    """Return a price frame with normalized tickers and rows sorted by date."""
+    cleaned_price_df = price_df.copy()
+    cleaned_price_df.index = pd.to_datetime(cleaned_price_df.index)
+    cleaned_price_df = cleaned_price_df[~cleaned_price_df.index.duplicated(keep='last')].sort_index()
+    cleaned_price_df.columns = [_normalize_ticker_symbol(column) for column in cleaned_price_df.columns]
+    return cleaned_price_df
+
+
+def _clean_metadata_frame(metadata_df):
+    """Normalize metadata columns and keep only the fields needed by the selector."""
+    required_columns = {'ticker', 'sector'}
+    missing_columns = required_columns - set(metadata_df.columns)
+    if missing_columns:
+        raise ValueError(f"metadata_df is missing required columns: {', '.join(sorted(missing_columns))}")
+
+    cleaned_metadata_df = metadata_df.copy()
+    cleaned_metadata_df['ticker'] = cleaned_metadata_df['ticker'].map(_normalize_ticker_symbol)
+    cleaned_metadata_df['sector'] = cleaned_metadata_df['sector'].fillna('Unknown').astype(str)
+    if 'market_cap' in cleaned_metadata_df.columns:
+        cleaned_metadata_df['market_cap'] = pd.to_numeric(cleaned_metadata_df['market_cap'], errors='coerce')
+    else:
+        cleaned_metadata_df['market_cap'] = np.nan
+
+    if 'avg_volume' in cleaned_metadata_df.columns:
+        cleaned_metadata_df['avg_volume'] = pd.to_numeric(cleaned_metadata_df['avg_volume'], errors='coerce')
+    else:
+        cleaned_metadata_df['avg_volume'] = np.nan
+
+    cleaned_metadata_df = cleaned_metadata_df.drop_duplicates(subset='ticker', keep='last')
+    return cleaned_metadata_df
+
+
+def _compute_asset_metrics(price_df, risk_free_rate=0.02):
+    """Compute annualized return, volatility, Sharpe ratio, and six-month momentum per asset."""
+    if price_df.shape[0] < 3:
+        raise ValueError("price_df must contain at least 3 rows to compute asset metrics.")
+
+    filled_prices = price_df.ffill().dropna(axis=1, how='all')
+    if filled_prices.shape[0] < 3 or filled_prices.shape[1] == 0:
+        raise ValueError("price_df does not contain enough clean data after forward-fill.")
+
+    daily_returns = filled_prices.pct_change().dropna(how='all')
+    annualized_return = daily_returns.mean() * 252
+    annualized_volatility = daily_returns.std(ddof=1) * np.sqrt(252)
+
+    metrics = pd.DataFrame(index=filled_prices.columns)
+    metrics['annual_return'] = annualized_return
+    metrics['annual_volatility'] = annualized_volatility
+    metrics['sharpe_ratio'] = np.where(
+        metrics['annual_volatility'] > 0,
+        (metrics['annual_return'] - risk_free_rate) / metrics['annual_volatility'],
+        np.nan
+    )
+
+    momentum_window = min(126, len(filled_prices))
+    momentum_prices = filled_prices.tail(momentum_window)
+    if momentum_window >= 2:
+        metrics['momentum_6m'] = momentum_prices.iloc[-1] / momentum_prices.iloc[0] - 1
+    else:
+        metrics['momentum_6m'] = np.nan
+
+    metrics.index.name = 'ticker'
+    return metrics
+
+
+def _rank_descending_to_score(series):
+    """Convert a descending rank into a higher-is-better score."""
+    ranks = series.rank(ascending=False, method='average')
+    return ranks.max() - ranks + 1
+
+
+def _select_sector_stratified_universe(scored_metadata_df, target_universe_size):
+    """Select a sector-balanced universe using the composite score."""
+    if scored_metadata_df.empty:
+        return []
+
+    eligible = scored_metadata_df.dropna(subset=['sector', 'composite_score']).copy()
+    if eligible.empty:
+        return []
+
+    eligible = eligible.sort_values(['sector', 'composite_score'], ascending=[True, False])
+    eligible['sector_count'] = eligible.groupby('sector')['ticker'].transform('size')
+
+    sector_groups = eligible.groupby('sector', sort=False)
+    num_sectors = max(int(sector_groups.ngroups), 1)
+    base_quota = target_universe_size // num_sectors
+
+    selected_frames = []
+    if base_quota > 0:
+        selected_frames = [group.head(base_quota) for _, group in sector_groups]
+
+    selected = pd.concat(selected_frames, axis=0) if selected_frames else eligible.head(0).copy()
+    selected = selected.drop_duplicates(subset='ticker', keep='first')
+
+    remaining_slots = target_universe_size - len(selected)
+    if remaining_slots > 0:
+        remaining_pool = eligible.loc[~eligible['ticker'].isin(selected['ticker'])].sort_values('composite_score', ascending=False)
+        selected = pd.concat([selected, remaining_pool.head(remaining_slots)], axis=0)
+
+    selected = selected.drop_duplicates(subset='ticker', keep='first')
+    selected = selected.sort_values('composite_score', ascending=False).head(target_universe_size)
+    return selected['ticker'].tolist()
+
+
+def _build_default_constraint_params(num_assets, metadata_subset=None):
+    """Create PSO constraints aligned with the project defaults."""
+    params = {
+        'lower_bounds': np.zeros(num_assets),
+        'upper_bounds': np.ones(num_assets) * 0.12,
+        'max_assets': min(12, num_assets),
+        'min_invest': 0.05,
+        'sector_max': 0.25,
+        'fixed_cost': 0.0,
+        'variable_cost': 0.0001,
+        'risk_free_rate': 0.02,
+        'lot_size': 0.01,
+    }
+
+    if metadata_subset is not None and not metadata_subset.empty:
+        sector_limits = PortfolioDataFetcher.build_sector_constraints(list(metadata_subset.index), metadata_subset)
+        params['sector_limits'] = sector_limits
+
+    return params
+
+
+def _evaluate_oos_sharpe(test_price_df, weights, risk_free_rate=0.02):
+    """Evaluate a fixed-weight portfolio on out-of-sample prices."""
+    if test_price_df.shape[0] < 3:
+        return np.nan
+
+    clean_test_prices = test_price_df.ffill().dropna(axis=0, how='any')
+    if clean_test_prices.shape[0] < 3:
+        return np.nan
+
+    test_returns = clean_test_prices.pct_change().dropna(how='any')
+    if test_returns.empty:
+        return np.nan
+
+    aligned_weights = np.asarray(weights, dtype=float)
+    portfolio_returns = test_returns.values @ aligned_weights
+    annual_return = np.mean(portfolio_returns) * 252
+    annual_volatility = np.std(portfolio_returns, ddof=1) * np.sqrt(252)
+    if annual_volatility <= 0:
+        return np.nan
+    return (annual_return - risk_free_rate) / annual_volatility
+
+
+def filter_universe(
+    price_df,
+    metadata_df,
+    target_universe_size=30,
+    train_window=504,
+    test_window=126,
+    risk_free_rate=0.02,
+    min_annualized_volatility=0.03,
+    grid_weights=None,
+    pso_particles=20,
+    pso_iterations=40,
+    constraint_params=None,
+    return_details=False,
+):
+    """Filter and rank a stock universe using walk-forward grid search plus PSO.
+
+    This function is designed for the portfolio optimization pipeline.
+    It avoids look-ahead bias by computing ranks and universe selection only on the
+    train slice inside each walk-forward fold.
+
+    Important: this function cannot fully remove survivorship bias by itself.
+    For a truly historical backtest, pass historical constituents in metadata_df,
+    not only the current S&P 500 membership.
+
+    Returns
+    -------
+    selected_tickers : list[str]
+    filtered_price_df : pandas.DataFrame
+    optional_details : dict (when return_details=True)
+    """
+    cleaned_price_df = _clean_price_frame(price_df)
+    cleaned_metadata_df = _clean_metadata_frame(metadata_df)
+
+    if cleaned_price_df.empty:
+        raise ValueError("price_df is empty after cleaning.")
+
+    if target_universe_size <= 0:
+        raise ValueError("target_universe_size must be positive.")
+
+    if min_annualized_volatility < 0:
+        raise ValueError("min_annualized_volatility must be non-negative.")
+
+    if grid_weights is None:
+        grid_weights = [(round(x, 1), round(1.0 - x, 1)) for x in np.arange(0.1, 1.0, 0.1)]
+
+    missing_rate = cleaned_price_df.isna().mean(axis=0)
+    price_integrity_cols = missing_rate[missing_rate <= 0.05].index.tolist()
+    cleaned_price_df = cleaned_price_df.loc[:, price_integrity_cols]
+
+    available_tickers = sorted(set(cleaned_price_df.columns).intersection(set(cleaned_metadata_df['ticker'])))
+    cleaned_price_df = cleaned_price_df.loc[:, available_tickers].copy()
+    cleaned_metadata_df = cleaned_metadata_df[cleaned_metadata_df['ticker'].isin(available_tickers)].copy()
+
+    if cleaned_price_df.shape[1] == 0 or cleaned_metadata_df.empty:
+        raise ValueError("No overlapping tickers remain after filtering price and metadata inputs.")
+
+    cleaned_metadata_df = cleaned_metadata_df[cleaned_metadata_df['ticker'].isin(cleaned_price_df.columns)].copy()
+
+    if cleaned_metadata_df.empty:
+        raise ValueError("No stocks remain after aligning metadata with price history.")
+
+    if train_window < 30 or test_window < 5:
+        raise ValueError("train_window and test_window are too small for walk-forward analysis.")
+
+    if len(cleaned_price_df) < train_window + test_window:
+        raise ValueError("Not enough price history for the requested walk-forward windows.")
+
+    price_df_daily = cleaned_price_df.ffill()
+    if price_df_daily.empty:
+        raise ValueError("No price history remains after forward-fill.")
+
+    fold_records = []
+    best_grid_summary = None
+    best_selected_tickers = []
+    best_filtered_price_df = pd.DataFrame()
+
+    for weight_x, weight_y in grid_weights:
+        fold_sharpes = []
+        fold_rows = []
+
+        for train_start in range(0, len(price_df_daily) - train_window - test_window + 1, test_window):
+            train_end = train_start + train_window
+            test_end = train_end + test_window
+
+            train_prices = price_df_daily.iloc[train_start:train_end]
+            test_prices = price_df_daily.iloc[train_end:test_end]
+
+            train_metrics = _compute_asset_metrics(train_prices, risk_free_rate=risk_free_rate)
+            train_metadata = cleaned_metadata_df.set_index('ticker').reindex(train_metrics.index)
+            train_metadata = train_metadata.dropna(subset=['sector'])
+            if train_metadata.empty:
+                continue
+
+            train_metadata_columns = [column for column in ['sector', 'market_cap', 'avg_volume'] if column in train_metadata.columns]
+            scored = train_metrics.join(train_metadata[train_metadata_columns], how='inner')
+            scored = scored[scored['annual_volatility'] >= min_annualized_volatility].copy()
+            if scored.empty:
+                continue
+
+            scored['sharpe_score'] = _rank_descending_to_score(scored['sharpe_ratio'])
+            scored['momentum_score'] = _rank_descending_to_score(scored['momentum_6m'])
+            scored['composite_score'] = weight_x * scored['sharpe_score'] + weight_y * scored['momentum_score']
+
+            selected_tickers = _select_sector_stratified_universe(scored.reset_index(), target_universe_size)
+            if len(selected_tickers) < 2:
+                continue
+
+            selected_train_prices = train_prices.loc[:, [ticker for ticker in selected_tickers if ticker in train_prices.columns]].copy()
+            selected_test_prices = test_prices.loc[:, [ticker for ticker in selected_tickers if ticker in test_prices.columns]].copy()
+            selected_tickers = [ticker for ticker in selected_tickers if ticker in selected_train_prices.columns and ticker in selected_test_prices.columns]
+
+            if len(selected_tickers) < 2:
+                continue
+
+            selected_train_prices = selected_train_prices.loc[:, selected_tickers].ffill().dropna(axis=0, how='any')
+            selected_test_prices = selected_test_prices.loc[:, selected_tickers].ffill().dropna(axis=0, how='any')
+            if selected_train_prices.shape[0] < 30 or selected_test_prices.shape[0] < 5:
+                continue
+
+            train_returns = selected_train_prices.pct_change().dropna(how='any')
+            if train_returns.empty:
+                continue
+
+            mean_returns = train_returns.mean() * 252
+            cov_matrix = train_returns.cov() * 252
+            optimizer = PortfolioOptimizer(mean_returns, cov_matrix, len(selected_tickers))
+
+            sector_metadata_subset = cleaned_metadata_df.set_index('ticker').reindex(selected_tickers)
+            pso_params = _build_default_constraint_params(len(selected_tickers), metadata_subset=sector_metadata_subset)
+            if constraint_params:
+                pso_params.update(constraint_params)
+            pso_params['upper_bounds'] = np.minimum(pso_params['upper_bounds'], np.ones(len(selected_tickers)) * 0.12)
+            pso_params['max_assets'] = min(int(pso_params.get('max_assets', 12)), len(selected_tickers))
+            pso_params['sector_limits'] = PortfolioDataFetcher.build_sector_constraints(selected_tickers, sector_metadata_subset)
+
+            weights, _ = optimizer.optimize_pso(
+                lambda_param=0.5,
+                params=pso_params,
+                n_particles=pso_particles,
+                n_iterations=pso_iterations
+            )
+
+            oos_sharpe = _evaluate_oos_sharpe(selected_test_prices, weights, risk_free_rate=risk_free_rate)
+            if np.isnan(oos_sharpe):
+                continue
+
+            fold_sharpes.append(float(oos_sharpe))
+            fold_rows.append({
+                'weight_x': float(weight_x),
+                'weight_y': float(weight_y),
+                'train_start': int(train_start),
+                'train_end': int(train_end),
+                'test_end': int(test_end),
+                'oos_sharpe': float(oos_sharpe),
+                'selected_ticker_count': int(len(selected_tickers)),
+            })
+
+        if fold_sharpes:
+            fold_records.append({
+                'weight_x': float(weight_x),
+                'weight_y': float(weight_y),
+                'mean_oos_sharpe': float(np.nanmean(fold_sharpes)),
+                'fold_count': int(len(fold_sharpes)),
+            })
+
+    if not fold_records:
+        raise ValueError("Walk-forward search failed to produce any valid folds. Check the input data coverage and constraints.")
+
+    walk_forward_results = pd.DataFrame(fold_records).sort_values('mean_oos_sharpe', ascending=False).reset_index(drop=True)
+    best_grid_summary = walk_forward_results.iloc[0].to_dict()
+    best_x = float(best_grid_summary['weight_x'])
+    best_y = float(best_grid_summary['weight_y'])
+
+    final_scores = _compute_asset_metrics(cleaned_price_df, risk_free_rate=risk_free_rate)
+    final_metadata = cleaned_metadata_df.set_index('ticker').reindex(final_scores.index)
+    final_metadata_columns = [column for column in ['sector', 'market_cap', 'avg_volume'] if column in final_metadata.columns]
+    final_scored = final_scores.join(final_metadata[final_metadata_columns], how='inner')
+    final_scored = final_scored[final_scored['annual_volatility'] >= min_annualized_volatility].copy()
+    final_scored['sharpe_score'] = _rank_descending_to_score(final_scored['sharpe_ratio'])
+    final_scored['momentum_score'] = _rank_descending_to_score(final_scored['momentum_6m'])
+    final_scored['composite_score'] = best_x * final_scored['sharpe_score'] + best_y * final_scored['momentum_score']
+
+    selected_tickers = _select_sector_stratified_universe(final_scored.reset_index(), target_universe_size)
+    filtered_price_df = cleaned_price_df.loc[:, [ticker for ticker in selected_tickers if ticker in cleaned_price_df.columns]].copy()
+    filtered_price_df = filtered_price_df.ffill().dropna(axis=0, how='any')
+
+    if return_details:
+        return selected_tickers, filtered_price_df, {
+            'best_weights': {'x': best_x, 'y': best_y},
+            'walk_forward_results': walk_forward_results,
+            'final_scored_universe': final_scored.sort_values('composite_score', ascending=False),
+        }
+
+    return selected_tickers, filtered_price_df
 
 
 # ========================
@@ -851,8 +1339,45 @@ def main():
         metavar='1-10',
         help='Run scale: 1=10%% of combinations, 10=100%% (default: 10)'
     )
+    parser.add_argument(
+        '--target-universe-size',
+        type=int,
+        default=50,
+        help='Target stock count after walk-forward filtering (default: 50)'
+    )
+    parser.add_argument(
+        '--fast',
+        action='store_true',
+        help='Use faster settings for exploratory runs (fewer PSO particles/iterations and fewer top combos)'
+    )
+    parser.add_argument('--wf-particles', type=int, default=8, help='PSO particles for walk-forward filter stage')
+    parser.add_argument('--wf-iterations', type=int, default=15, help='PSO iterations for walk-forward filter stage')
+    parser.add_argument('--combo-particles', type=int, default=12, help='PSO particles for constraint combinations')
+    parser.add_argument('--combo-iterations', type=int, default=50, help='PSO iterations for constraint combinations')
+    parser.add_argument('--lambda-particles', type=int, default=10, help='PSO particles for lambda sweep')
+    parser.add_argument('--lambda-iterations', type=int, default=35, help='PSO iterations for lambda sweep')
+    parser.add_argument('--top-k-lambda-combos', type=int, default=10, help='Number of top constraint combos for lambda sweep')
     args = parser.parse_args()
     scale = args.scale
+    target_universe_size = args.target_universe_size
+    wf_particles = args.wf_particles
+    wf_iterations = args.wf_iterations
+    combo_particles = args.combo_particles
+    combo_iterations = args.combo_iterations
+    lambda_particles = args.lambda_particles
+    lambda_iterations = args.lambda_iterations
+    top_k_lambda_combos = args.top_k_lambda_combos
+
+    if args.fast:
+        scale = min(scale, 3)
+        wf_particles = min(wf_particles, 4)
+        wf_iterations = min(wf_iterations, 8)
+        combo_particles = min(combo_particles, 8)
+        combo_iterations = min(combo_iterations, 25)
+        lambda_particles = min(lambda_particles, 6)
+        lambda_iterations = min(lambda_iterations, 20)
+        top_k_lambda_combos = min(top_k_lambda_combos, 5)
+
     scale_pct = scale * 10
 
     print("="*70)
@@ -860,22 +1385,50 @@ def main():
     print("="*70)
     if scale < 10:
         print(f"[Scale mode: {scale}/10 — running {scale_pct}% of combinations and lambda values]")
+    if args.fast:
+        print("[Fast mode enabled]")
     
-    # Build the optimization universe from 100 US large-cap stocks.
-    stocks = PortfolioDataFetcher.get_top_100_us_stocks()
-    print(f"\nCandidate universe size: {len(stocks)} US large-cap stocks")
+    # Build the optimization universe from the full S&P 500 cache.
+    stocks = PortfolioDataFetcher.get_sp500_stocks()
+    print(f"\nCandidate universe size: {len(stocks)} S&P 500 stocks")
     
     # Fetch data
-    fetcher = PortfolioDataFetcher(stocks)
+    analysis_start_date = datetime.now().date() - timedelta(days=365 * 10)
+    fetcher = PortfolioDataFetcher(stocks, start_date=analysis_start_date)
     price_data = fetcher.fetch_data()
     stocks = list(price_data.columns)
-    mean_returns, cov_matrix, returns = fetcher.calculate_statistics(price_data)
     
     # Fetch real trading parameters
     print("\nFetching real trading costs and lot sizes...")
     asset_metadata = fetcher.fetch_asset_metadata(stocks)
     trading_costs = fetcher.fetch_trading_costs(stocks)
     lot_sizes = fetcher.fetch_lot_sizes(stocks)
+
+    universe_metadata = asset_metadata.reset_index().rename(columns={'index': 'ticker'})
+    print("\nRunning walk-forward universe selection...")
+    selected_tickers, filtered_price_data, wf_details = filter_universe(
+        price_df=price_data,
+        metadata_df=universe_metadata[['ticker', 'sector']],
+        target_universe_size=min(target_universe_size, len(stocks)),
+        train_window=504,
+        test_window=126,
+        risk_free_rate=0.02,
+        min_annualized_volatility=0.03,
+        pso_particles=wf_particles,
+        pso_iterations=wf_iterations,
+        return_details=True,
+    )
+    print(
+        f"Walk-forward selected {len(selected_tickers)} tickers using x={wf_details['best_weights']['x']:.1f}, "
+        f"y={wf_details['best_weights']['y']:.1f}"
+    )
+
+    price_data = filtered_price_data
+    stocks = selected_tickers
+    asset_metadata = asset_metadata.loc[stocks]
+    trading_costs = trading_costs.loc[stocks]
+    lot_sizes = lot_sizes.loc[stocks]
+    mean_returns, cov_matrix, returns = fetcher.calculate_statistics(price_data)
     sector_limits = fetcher.build_sector_constraints(stocks, asset_metadata)
     
     # Calculate average trading costs
@@ -993,8 +1546,8 @@ def main():
         max_weight_grid=max_weight_grid,
         cardinality_grid=cardinality_grid,
         sector_max_grid=sector_max_grid,
-        n_particles=12,
-        n_iterations=50
+        n_particles=combo_particles,
+        n_iterations=combo_iterations
     )
 
     combo_results_df = combo_results_df.sort_values('sharpe_ratio', ascending=False).reset_index(drop=True)
@@ -1032,7 +1585,7 @@ def main():
     lambda_grid = _subsample_grid(_lambda_full, scale)
     print(f"\nLambda grid size: {len(lambda_grid)} values")
 
-    top_k = min(10, len(combo_results_df))
+    top_k = min(top_k_lambda_combos, len(combo_results_df))
     top_combo_rows = combo_results_df.head(top_k)
     all_lambda_results = []
     best_lambda_sharpe = -np.inf
@@ -1060,8 +1613,8 @@ def main():
             optimizer=optimizer,
             best_params=combo_params,
             lambda_grid=lambda_grid,
-            n_particles=10,
-            n_iterations=35,
+            n_particles=lambda_particles,
+            n_iterations=lambda_iterations,
             run_label=run_label,
             show_header=False,
             show_lambda_progress=False,

@@ -14,6 +14,13 @@ python test_setup.py
 
 You should see all tests passing ✓
 
+### Step 3: Build the local market-data cache once
+```bash
+python build_sp500_cache.py
+```
+
+This downloads 10 years of daily prices for the current S&P 500 constituents and stores reusable CSV cache files locally.
+
 ---
 
 ## Run Your First Optimization
@@ -24,7 +31,8 @@ python portfolio_optimization.py
 ```
 
 This will:
-- Download 2 years of data for 100 US large-cap stocks
+- Load price history and market metadata from the local cache CSVs when available
+- Fall back to `yfinance` only if the cache files are missing
 - Run unconstrained optimization
 - Run PSO with 7 realistic constraints
 - Let the algorithm choose the final subset of holdings automatically
